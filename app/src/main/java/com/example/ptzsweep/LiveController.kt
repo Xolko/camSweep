@@ -1,15 +1,11 @@
 package com.example.ptzsweep
 
 import android.content.Context
+import android.net.Uri
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.media3.common.MediaItem
-import androidx.media3.common.PlaybackException
-import androidx.media3.common.Player
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.rtsp.RtspMediaSource
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -19,21 +15,32 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.videolan.libvlc.LibVLC
+import org.videolan.libvlc.Media
+import org.videolan.libvlc.MediaPlayer
+import org.videolan.libvlc.util.VLCVideoLayout
 
 class LiveController(
     context: Context,
     private val store: SettingsStore,
     private val scope: CoroutineScope,
 ) {
+    private val appContext = context.applicationContext
+
     var settings by mutableStateOf(store.load())
         private set
 
-    // ---- video ----
-    val player: ExoPlayer = ExoPlayer.Builder(context).build().apply { volume = 0f }
+    // ---- video (libVLC) ----
     var videoOn by mutableStateOf(false)
         private set
     var videoStatus by mutableStateOf("")
         private set
+    private var libVlc: LibVLC? = null
+    private var vlcPlayer: MediaPlayer? = null
+    @Volatile private var attached = false
+    private var mainUri: String? = null
+    private var currentUri = ""
+    private var triedMain = false
 
     // ---- manual control + sweep ----
     var message by mutableStateOf("")
@@ -48,52 +55,6 @@ class LiveController(
     private var clientKey = ""
     private var moveJob: Job? = null
     private var sweepJob: Job? = null
-
-    private var mainUri: String? = null
-    private var currentUri = ""
-    private var triedMain = false
-
-    /** Never show the camera login, even inside error messages. */
-    private fun hideLogin(text: String) = text.replace(Regex("""://[^/@\s]*@"""), "://")
-
-    private fun play(uri: String) {
-        currentUri = uri
-        val source = RtspMediaSource.Factory()
-            .setForceUseRtpTcp(true)
-            .createMediaSource(MediaItem.fromUri(uri))
-        player.setMediaSource(source)
-        player.prepare()
-        player.playWhenReady = true
-    }
-
-    init {
-        player.addListener(object : Player.Listener {
-            override fun onPlayerError(error: PlaybackException) {
-                val fallback = mainUri
-                if (!triedMain && fallback != null && fallback != currentUri) {
-                    triedMain = true
-                    videoStatus = "Trying full-quality stream…"
-                    scope.launch { play(fallback) }
-                    return
-                }
-                videoOn = false
-                videoStatus = hideLogin(
-                    "Couldn't play video.\n" +
-                        "Error: ${error.errorCodeName}\n" +
-                        "Address: $currentUri\n" +
-                        (error.cause?.message ?: "")
-                )
-            }
-
-            override fun onPlaybackStateChanged(state: Int) {
-                if (!videoOn) return
-                when (state) {
-                    Player.STATE_READY -> videoStatus = "LIVE"
-                    Player.STATE_BUFFERING -> videoStatus = "Buffering…"
-                }
-            }
-        })
-    }
 
     fun reloadSettings() { settings = store.load() }
     fun setSpeed(v: Float) { settings = settings.copy(speed = v) }
@@ -112,6 +73,71 @@ class LiveController(
 
     // ---- video ----
 
+    /** Never show the camera login, even inside error messages. */
+    private fun hideLogin(text: String) = text.replace(Regex("""://[^/@\s]*@"""), "://")
+
+    private fun ensurePlayer(): MediaPlayer {
+        vlcPlayer?.let { return it }
+        val lib = LibVLC(appContext, arrayListOf<String>())
+        val mp = MediaPlayer(lib)
+        mp.setEventListener { e -> onVlcEvent(e) }
+        libVlc = lib
+        vlcPlayer = mp
+        return mp
+    }
+
+    private fun onVlcEvent(e: MediaPlayer.Event) {
+        if (!videoOn) return
+        when (e.type) {
+            MediaPlayer.Event.Playing -> videoStatus = "LIVE"
+            MediaPlayer.Event.Buffering ->
+                videoStatus = if (e.buffering < 100f) "Buffering…" else "LIVE"
+            MediaPlayer.Event.EncounteredError,
+            MediaPlayer.Event.EndReached -> scope.launch { onVideoFailed() }
+        }
+    }
+
+    private fun onVideoFailed() {
+        if (!videoOn) return
+        val fallback = mainUri
+        if (!triedMain && fallback != null && fallback != currentUri) {
+            triedMain = true
+            videoStatus = "Trying full-quality stream…"
+            play(fallback)
+            return
+        }
+        videoOn = false
+        runCatching { vlcPlayer?.stop() }
+        videoStatus = hideLogin("Couldn't play video.\nAddress: $currentUri")
+    }
+
+    private fun play(uri: String) {
+        currentUri = uri
+        val mp = ensurePlayer()
+        val media = Media(libVlc, Uri.parse(uri))
+        media.addOption(":network-caching=300")
+        mp.setMedia(media)
+        media.release()
+        mp.play()
+        mp.setVolume(0)
+    }
+
+    /** Called by the video view once it is on screen. */
+    fun attach(layout: VLCVideoLayout) {
+        try {
+            ensurePlayer().attachViews(layout, null, false, false)
+            attached = true
+        } catch (t: Throwable) {
+            videoOn = false
+            videoStatus = "Video player failed to start: ${t.message}"
+        }
+    }
+
+    fun detach() {
+        attached = false
+        runCatching { vlcPlayer?.detachViews() }
+    }
+
     fun startVideo() {
         videoOn = true
         triedMain = false
@@ -123,11 +149,13 @@ class LiveController(
                     c.streamUri(preferSub = true) to c.streamUri(preferSub = false)
                 }
                 mainUri = main
-                play(sub) // the lighter stream first; it decodes more reliably on phones
+                var waited = 0
+                while (!attached && waited < 2000) { delay(50); waited += 50 }
+                play(sub) // the lighter stream first
                 videoStatus = "Connecting…"
             } catch (e: CancellationException) {
                 throw e
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 videoOn = false
                 videoStatus = hideLogin("Video error: ${e.message}")
             }
@@ -136,10 +164,9 @@ class LiveController(
 
     fun stopVideo() {
         if (!videoOn && videoStatus.isEmpty()) return
-        player.stop()
-        player.clearMediaItems()
         videoOn = false
         videoStatus = ""
+        runCatching { vlcPlayer?.stop() }
     }
 
     // ---- manual control (hold a button to move, release to stop) ----
@@ -214,6 +241,8 @@ class LiveController(
 
     fun release() {
         sweepJob?.cancel()
-        player.release()
+        runCatching { vlcPlayer?.stop() }
+        runCatching { vlcPlayer?.release() }
+        runCatching { libVlc?.release() }
     }
 }

@@ -54,7 +54,7 @@ fun Root() {
         Box(Modifier.padding(padding).fillMaxSize()) {
             when (tab) {
                 0 -> LiveScreen(live)
-                1 -> RecordingsScreen()
+                1 -> RecordingsScreen(store)
                 else -> SettingsScreen(store) { live.reloadSettings() }
             }
         }

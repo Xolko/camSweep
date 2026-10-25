@@ -27,12 +27,15 @@ import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
+import androidx.compose.ui.text.font.FontFamily
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 private val SPEEDS = listOf(0.5f, 1f, 2f, 4f, 8f)
 
 @Composable
-fun RecordingsScreen() {
+fun RecordingsScreen(store: SettingsStore) {
     val context = LocalContext.current
     val player = remember { ExoPlayer.Builder(context).build() }
 
@@ -43,6 +46,9 @@ fun RecordingsScreen() {
     var sliderPos by remember { mutableFloatStateOf(0f) }
     var dragging by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf("") }
+    val scope = rememberCoroutineScope()
+    var sdReport by remember { mutableStateOf("") }
+    var sdChecking by remember { mutableStateOf(false) }
 
     DisposableEffect(player) {
         val listener = object : Player.Listener {
@@ -84,6 +90,36 @@ fun RecordingsScreen() {
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         Text("Recordings", style = MaterialTheme.typography.headlineSmall)
+
+        Panel("Camera SD card") {
+            Text(
+                "Check whether your camera lets this app browse and play the recordings on its SD card.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            OutlinedButton(
+                onClick = {
+                    sdChecking = true
+                    sdReport = ""
+                    scope.launch(Dispatchers.IO) {
+                        sdReport = try {
+                            val c = store.load()
+                            val oc = OnvifClient(c.host, c.port, c.user, c.pass)
+                            oc.connect()
+                            oc.storageReport()
+                        } catch (e: Exception) {
+                            "Could not check: ${e.message}"
+                        }
+                        sdChecking = false
+                    }
+                },
+                enabled = !sdChecking,
+                modifier = Modifier.fillMaxWidth()
+            ) { Text(if (sdChecking) "Checking…" else "Check SD card support") }
+            if (sdReport.isNotEmpty()) {
+                Text(sdReport, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+            }
+        }
 
         if (fileName == null) {
             Panel {

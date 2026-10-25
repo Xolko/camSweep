@@ -83,6 +83,68 @@ class OnvifClient(
         else raw
     }
 
+    /** Lists the ONVIF services the camera offers, as namespace -> address. */
+    private fun services(): Map<String, String> {
+        val xml = call(deviceUrl,
+            """<GetServices xmlns="http://www.onvif.org/ver10/device/wsdl"><IncludeCapability>false</IncludeCapability></GetServices>""")
+        return Regex("""<(?:\w+:)?Namespace>([^<]+)</(?:\w+:)?Namespace>\s*<(?:\w+:)?XAddr>([^<]+)</(?:\w+:)?XAddr>""")
+            .findAll(xml).associate { it.groupValues[1].trim() to it.groupValues[2].trim() }
+    }
+
+    /** Asks the camera what it offers for SD card recordings and reports in plain text. */
+    fun storageReport(): String {
+        val out = StringBuilder()
+        val svc = try {
+            services()
+        } catch (e: Exception) {
+            return "Could not read the camera's service list: ${e.message}"
+        }
+        val names = svc.keys.map { it.substringAfter("onvif.org/").substringBefore("/wsdl") }.sorted()
+        out.appendLine("Services: " + names.joinToString(", "))
+
+        val rec = svc.entries.firstOrNull { it.key.endsWith("/recording/wsdl") }?.value
+        val search = svc.entries.firstOrNull { it.key.endsWith("/search/wsdl") }?.value
+        val replay = svc.entries.firstOrNull { it.key.endsWith("/replay/wsdl") }?.value
+        fun yn(v: String?) = if (v != null) "yes" else "no"
+        out.appendLine("Recording: ${yn(rec)}   Search: ${yn(search)}   Replay: ${yn(replay)}")
+
+        if (rec == null && search == null && replay == null) {
+            out.appendLine()
+            out.append("This camera does not offer SD card recordings over ONVIF.")
+            return out.toString()
+        }
+
+        var token: String? = null
+        if (rec != null) {
+            runCatching {
+                val x = call(rec, """<GetRecordings xmlns="http://www.onvif.org/ver10/recording/wsdl"/>""")
+                val tokens = Regex("""<(?:\w+:)?RecordingToken>([^<]+)<""").findAll(x)
+                    .map { it.groupValues[1] }.distinct().toList()
+                out.appendLine("Recordings found: ${tokens.size}")
+                token = tokens.firstOrNull()
+            }.onFailure { out.appendLine("GetRecordings failed: ${it.message}") }
+        }
+
+        if (search != null) {
+            runCatching {
+                val x = call(search, """<GetRecordingSummary xmlns="http://www.onvif.org/ver10/search/wsdl"/>""")
+                fun tag(n: String) = Regex("""<(?:\w+:)?$n>([^<]+)<""").find(x)?.groupValues?.get(1)
+                out.appendLine("Storage: ${tag("NumberRecordings") ?: "?"} recordings, " +
+                    "from ${tag("DataFrom") ?: "?"} to ${tag("DataUntil") ?: "?"}")
+            }.onFailure { out.appendLine("Search failed: ${it.message}") }
+        }
+
+        val t = token
+        if (replay != null && t != null) {
+            runCatching {
+                val x = call(replay, """<GetReplayUri xmlns="http://www.onvif.org/ver10/replay/wsdl"><StreamSetup><Stream xmlns="http://www.onvif.org/ver10/schema">RTP-Unicast</Stream><Transport xmlns="http://www.onvif.org/ver10/schema"><Protocol>RTSP</Protocol></Transport></StreamSetup><RecordingToken>$t</RecordingToken></GetReplayUri>""")
+                val uri = Regex("""<(?:\w+:)?Uri>([^<]+)""").find(x)?.groupValues?.get(1)?.replace("&amp;", "&")
+                out.appendLine("Playback address: ${uri ?: "none"}")
+            }.onFailure { out.appendLine("Playback address failed: ${it.message}") }
+        }
+        return out.toString().trim()
+    }
+
     // ---- internals ----
 
     private fun xaddr(xml: String, tag: String): String? =

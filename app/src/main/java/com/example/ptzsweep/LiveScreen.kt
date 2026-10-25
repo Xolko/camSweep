@@ -15,11 +15,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.media3.ui.PlayerView
+import org.videolan.libvlc.util.VLCVideoLayout
 
 @Composable
 fun LiveScreen(live: LiveController) {
@@ -40,12 +41,13 @@ private fun VideoCard(live: LiveController) {
             .clip(RoundedCornerShape(20.dp)).background(Color.Black)
     ) {
         if (live.videoOn) {
-            AndroidView(
-                factory = { ctx ->
-                    PlayerView(ctx).apply { player = live.player; useController = false }
-                },
-                modifier = Modifier.fillMaxSize()
-            )
+            val ctx = LocalContext.current
+            val layout = remember { VLCVideoLayout(ctx) }
+            DisposableEffect(layout) {
+                live.attach(layout)
+                onDispose { live.detach() }
+            }
+            AndroidView(factory = { layout }, modifier = Modifier.fillMaxSize())
             StatusPill(live.videoStatus, Modifier.align(Alignment.TopStart).padding(10.dp))
             TextButton(
                 onClick = live::stopVideo,
