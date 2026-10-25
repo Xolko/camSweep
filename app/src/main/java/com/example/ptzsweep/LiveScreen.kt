@@ -1,5 +1,8 @@
 package com.example.ptzsweep
 
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -20,6 +23,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
 import org.videolan.libvlc.util.VLCVideoLayout
 
 @Composable
@@ -31,6 +35,7 @@ fun LiveScreen(live: LiveController) {
         VideoCard(live)
         ControlCard(live)
         SweepCard(live)
+        FloatingCard(live)
     }
 }
 
@@ -198,3 +203,52 @@ private fun SweepCard(live: LiveController) {
 @Composable
 private fun Modifier.horizontalScrollCompat(): Modifier =
     this.then(Modifier.horizontalScroll(rememberScrollState()))
+
+
+@Composable
+private fun FloatingCard(live: LiveController) {
+    val context = LocalContext.current
+    val running = OverlayState.running
+    Panel("Floating window") {
+        Text(
+            "Shows the live video in a small window that stays on top of other apps, " +
+                "with a sweep button and a see-through screenshot button.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Button(
+            onClick = {
+                when {
+                    OverlayState.running ->
+                        context.stopService(Intent(context, FloatingCamService::class.java))
+                    !Settings.canDrawOverlays(context) ->
+                        context.startActivity(
+                            Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                Uri.parse("package:${context.packageName}"))
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                    else -> {
+                        live.stopVideo()
+                        ContextCompat.startForegroundService(
+                            context, Intent(context, FloatingCamService::class.java)
+                        )
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxWidth().height(52.dp)
+        ) {
+            Text(
+                when {
+                    running -> "Hide floating window"
+                    !Settings.canDrawOverlays(context) -> "Allow, then show floating window"
+                    else -> "Show floating window"
+                }
+            )
+        }
+        Text(
+            "After it appears, press Home to use it over other apps. Drag it to move it.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
